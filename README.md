@@ -6,7 +6,7 @@
 
 The LLM Debate Arena is a full-stack web application that lets you host and watch debates between different language models. It pits models against each other to argue opposing sides of various topics, from philosophical questions to absurdist propositions.
 
-![LLM Debate Arena Screenshot](https://via.placeholder.com/800x450)
+![LLM Debate Arena Screenshot](Images/DebateArena.png)
 
 ## Why Though?
 
