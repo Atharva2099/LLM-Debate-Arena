@@ -8,6 +8,8 @@ import json
 import time
 from typing import List, Dict, Tuple, Optional, Any
 
+from llm_api_service import LLMApiService
+
 # Constants
 MODELS = [
     {"id": "phi4", "name": "Phi-4", "api_endpoint": "/api/generate/phi4"},
@@ -99,6 +101,7 @@ class DebateManager:
         self.current_debate = None
         self.debate_log = []
         self.is_running = False
+        self.api_service = LLMApiService()
     
     def start_new_debate(self) -> Dict[str, Any]:
         """
@@ -122,6 +125,7 @@ class DebateManager:
             "topic": topic,
             "round": 1,
             "exchange": 0,
+            "total_exchanges": DEBATE_CONSTANTS["EXCHANGES_PER_ROUND"],
             "debaters": [
                 {
                     **selected_models[0],
@@ -163,27 +167,62 @@ class DebateManager:
             return self.get_debate_status()
         
         debate = self.current_debate
-        speaker = debate["debaters"][debate["current_speaker"]]
+        speaker_idx = debate["current_speaker"]
+        speaker = debate["debaters"][speaker_idx]
+        opponent_idx = 1 if speaker_idx == 0 else 0
+        opponent = debate["debaters"][opponent_idx]
         
         # Determine what happens next
         if debate["round"] in [1, 2]:
             if debate["exchange"] < DEBATE_CONSTANTS["EXCHANGES_PER_ROUND"]:
                 # Regular exchange
-                message_type = "opening" if debate["exchange"] == 0 else "regular"
+                is_opening = debate["exchange"] == 0
+                is_conclusion = debate["exchange"] == DEBATE_CONSTANTS["EXCHANGES_PER_ROUND"] - 1
+                
                 word_limit = (DEBATE_CONSTANTS["CONCLUSION_WORD_LIMIT"] 
-                             if debate["exchange"] == DEBATE_CONSTANTS["EXCHANGES_PER_ROUND"] - 1 
+                             if is_conclusion 
                              else DEBATE_CONSTANTS["REGULAR_WORD_LIMIT"])
                 
-                # Here we would normally make an API call to the LLM
-                # For now, we'll just add a placeholder message
+                # Find the opponent's last message (if applicable)
+                opponent_message = None
+                if not is_opening:
+                    for msg in reversed(self.debate_log):
+                        if msg.get("type") == "debater" and msg.get("debater") == opponent["codename"]:
+                            opponent_message = msg
+                            break
+                
+                # Generate prompt and get response from the LLM
+                prompt = self._generate_prompt(
+                    topic=debate["topic"],
+                    is_opening=is_opening,
+                    is_conclusion=is_conclusion,
+                    word_limit=word_limit,
+                    speaker=speaker,
+                    opponent=opponent,
+                    opponent_argument=opponent_message["content"] if opponent_message else None
+                )
+                
+                try:
+                    # Call the LLM API service to get a response
+                    content = self.api_service.generate_response(
+                        model_id=speaker["id"],
+                        prompt=prompt,
+                        max_tokens=word_limit * 2,  # Allow some extra tokens for the response
+                        temperature=DEBATE_CONSTANTS["TEMPERATURE"]
+                    )
+                except Exception as e:
+                    # Fallback to placeholder if API call fails
+                    content = f"[API call failed: {str(e)}. This is where {speaker['name']} ({speaker['codename']}) would provide a {word_limit}-word {speaker['position']} argument for the topic \"{debate['topic']}\"]"
+                
+                # Create the new message
                 new_message = {
                     "type": "debater",
                     "debater": speaker["codename"],
                     "model": speaker["name"],
-                    "content": f"[This is where {speaker['name']} ({speaker['codename']}) would provide a {word_limit}-word "
-                              f"{speaker['position']} {message_type} for the topic \"{debate['topic']}\"]",
+                    "content": content,
                     "position": speaker["position"],
                     "exchange": debate["exchange"],
+                    "round": debate["round"],
                     "timestamp": time.time()
                 }
                 
@@ -227,9 +266,9 @@ class DebateManager:
                         "content": f"Debate Concluded\n\nBoth rounds completed for the topic: \"{debate['topic']}\"\n\n"
                                   f"In Round 1:\n"
                                   f"- {debate['debaters'][0]['codename']} ({debate['debaters'][0]['name']}) argued "
-                                  f"{'AGAINST' if debate['debaters'][0]['position'] == 'pro' else 'FOR'}\n"
+                                  f"{'AGAINST' if debate['debaters'][0]['position'] == 'anti' else 'FOR'}\n"
                                   f"- {debate['debaters'][1]['codename']} ({debate['debaters'][1]['name']}) argued "
-                                  f"{'AGAINST' if debate['debaters'][1]['position'] == 'pro' else 'FOR'}\n\n"
+                                  f"{'AGAINST' if debate['debaters'][1]['position'] == 'anti' else 'FOR'}\n\n"
                                   f"In Round 2:\n"
                                   f"- {debate['debaters'][0]['codename']} ({debate['debaters'][0]['name']}) argued "
                                   f"{'FOR' if debate['debaters'][0]['position'] == 'pro' else 'AGAINST'}\n"
@@ -242,6 +281,53 @@ class DebateManager:
                     self.is_running = False
         
         return self.get_debate_status()
+    
+    def _generate_prompt(self, topic: str, is_opening: bool, is_conclusion: bool, 
+                        word_limit: int, speaker: Dict[str, Any], opponent: Dict[str, Any], 
+                        opponent_argument: Optional[str] = None) -> str:
+        """
+        Generate a prompt for the LLM based on the current debate state
+        
+        Args:
+            topic: The debate topic
+            is_opening: Whether this is an opening statement
+            is_conclusion: Whether this is a conclusion statement
+            word_limit: Maximum word limit for the response
+            speaker: The current speaker's information
+            opponent: The opponent's information
+            opponent_argument: The opponent's last argument (if any)
+            
+        Returns:
+            Formatted prompt string for the LLM
+        """
+        if is_opening:
+            template = PROMPT_TEMPLATES["OPENING_STATEMENT"]
+            prompt = template.format(
+                topic=topic,
+                position=speaker["position"],
+                word_limit=word_limit,
+                codename=speaker["codename"]
+            )
+        elif is_conclusion:
+            template = PROMPT_TEMPLATES["CONCLUSION_STATEMENT"]
+            prompt = template.format(
+                topic=topic,
+                position=speaker["position"],
+                word_limit=word_limit,
+                codename=speaker["codename"]
+            )
+        else:
+            template = PROMPT_TEMPLATES["REGULAR_EXCHANGE"]
+            prompt = template.format(
+                topic=topic,
+                position=speaker["position"],
+                opponent_codename=opponent["codename"],
+                opponent_argument=opponent_argument,
+                word_limit=word_limit,
+                codename=speaker["codename"]
+            )
+        
+        return prompt
     
     def toggle_debate_running(self) -> Dict[str, Any]:
         """
@@ -327,77 +413,10 @@ class DebateManager:
             api_keys: Dictionary of API keys for each model
         """
         self.api_keys = api_keys
+        self.api_service.update_api_keys(api_keys)
 
 
-# Function to create a properly formatted API call to the LLM
-def generate_llm_prompt(debate_data: Dict[str, Any], model_id: str, 
-                       position: str, exchange: int, opponent_message: Optional[str] = None) -> str:
-    """
-    Generate a prompt for the LLM based on the current debate state
-    
-    Args:
-        debate_data: Current debate data
-        model_id: ID of the model to generate for
-        position: Position ("pro" or "anti")
-        exchange: Current exchange number
-        opponent_message: The opponent's last message content
-        
-    Returns:
-        Formatted prompt string for the LLM
-    """
-    topic = debate_data["topic"]
-    
-    # Find the debater with this model_id
-    debater = None
-    opponent = None
-    for d in debate_data["debaters"]:
-        if d["id"] == model_id:
-            debater = d
-        else:
-            opponent = d
-    
-    if not debater or not opponent:
-        raise ValueError(f"Could not find debater with model_id {model_id}")
-    
-    word_limit = (DEBATE_CONSTANTS["CONCLUSION_WORD_LIMIT"] 
-                 if exchange == DEBATE_CONSTANTS["EXCHANGES_PER_ROUND"] - 1 
-                 else DEBATE_CONSTANTS["REGULAR_WORD_LIMIT"])
-    
-    # Determine which prompt template to use
-    if exchange == 0:
-        # Opening statement
-        template = PROMPT_TEMPLATES["OPENING_STATEMENT"]
-        prompt = template.format(
-            topic=topic,
-            position=position,
-            word_limit=word_limit,
-            codename=debater["codename"]
-        )
-    elif exchange == DEBATE_CONSTANTS["EXCHANGES_PER_ROUND"] - 1:
-        # Conclusion statement
-        template = PROMPT_TEMPLATES["CONCLUSION_STATEMENT"]
-        prompt = template.format(
-            topic=topic,
-            position=position,
-            word_limit=word_limit,
-            codename=debater["codename"]
-        )
-    else:
-        # Regular exchange
-        template = PROMPT_TEMPLATES["REGULAR_EXCHANGE"]
-        prompt = template.format(
-            topic=topic,
-            position=position,
-            opponent_codename=opponent["codename"],
-            opponent_argument=opponent_message,
-            word_limit=word_limit,
-            codename=debater["codename"]
-        )
-    
-    return prompt
-
-
-# Example usage
+# For testing
 if __name__ == "__main__":
     # Create a debate manager
     manager = DebateManager()
@@ -412,8 +431,3 @@ if __name__ == "__main__":
         latest_message = debate_status['debate_log'][-1]
         print(f"[{latest_message['type']}] {latest_message.get('debater', 'System')}: {latest_message['content'][:50]}...")
         time.sleep(1)
-    
-    # Export the debate to markdown
-    markdown_export = manager.export_debate(format_type="markdown")
-    print("\nMarkdown Export Example (truncated):")
-    print(markdown_export[:200] + "...")

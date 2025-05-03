@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__, static_folder='../frontend/build')
-CORS(app)  # Enable CORS for all routes
+CORS(app, resources={r"/api/*": {"origins": "*"}})  # Enable CORS for all /api/ routes
 
 # Initialize the debate manager and API service
 debate_manager = DebateManager()
@@ -157,7 +157,7 @@ def generate_llm_response():
 
 if __name__ == '__main__':
     # Get the port from the environment (for deployment)
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 5001))
     
     # Run the app
     app.run(host='0.0.0.0', port=port, debug=True)

@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import './DebateArena.css';
+import MessageContent from './MessageContent';
+import ModelDisplay from './ModelDisplay';
 
 const DebateArena = () => {
   const [debateStatus, setDebateStatus] = useState({
@@ -9,6 +11,8 @@ const DebateArena = () => {
     is_running: false
   });
   const [loading, setLoading] = useState(false);
+  const [autoProgress, setAutoProgress] = useState(false);
+  const [progressTimer, setProgressTimer] = useState(null);
   const messagesEndRef = useRef(null);
 
   // Fetch initial debate status
@@ -20,6 +24,30 @@ const DebateArena = () => {
   useEffect(() => {
     scrollToBottom();
   }, [debateStatus.debate_log]);
+  
+  // Clean up any timers when component unmounts
+  useEffect(() => {
+    return () => {
+      if (progressTimer) {
+        clearTimeout(progressTimer);
+      }
+    };
+  }, [progressTimer]);
+  
+  // Handle auto-progression for debates
+  useEffect(() => {
+    if (autoProgress && 
+        debateStatus.is_running && 
+        debateStatus.current_debate && 
+        !debateStatus.current_debate.finished) {
+      const timer = setTimeout(() => {
+        progressDebate();
+      }, 1000); // Wait 1 second before next progression
+      
+      setProgressTimer(timer);
+      return () => clearTimeout(timer);
+    }
+  }, [autoProgress, debateStatus, debateStatus.debate_log.length]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -41,6 +69,8 @@ const DebateArena = () => {
     try {
       const response = await axios.post('/api/debate/start');
       setDebateStatus(response.data);
+      // Automatically start progression when a new debate is created
+      setAutoProgress(true);
     } catch (error) {
       console.error('Error starting new debate:', error);
     } finally {
@@ -50,15 +80,35 @@ const DebateArena = () => {
 
   // Progress the debate
   const progressDebate = async () => {
+    if (loading) return;
+    
     setLoading(true);
     try {
       const response = await axios.post('/api/debate/progress');
       setDebateStatus(response.data);
+      
+      // Check if we've reached the end of a round but not the end of the debate
+      const debate = response.data.current_debate;
+      if (debate && 
+          !debate.finished && 
+          debate.exchange === 0 && 
+          debate.round === 2) {
+        // We've reached the start of round 2, pause auto-progression
+        setAutoProgress(false);
+      }
     } catch (error) {
       console.error('Error progressing debate:', error);
+      // If there's an error, stop auto-progression
+      setAutoProgress(false);
     } finally {
       setLoading(false);
     }
+  };
+
+  // Toggle auto-progression
+  const toggleAutoProgress = () => {
+    const newState = !autoProgress;
+    setAutoProgress(newState);
   };
 
   // Toggle debate running state
@@ -66,6 +116,11 @@ const DebateArena = () => {
     try {
       const response = await axios.post('/api/debate/toggle');
       setDebateStatus(response.data);
+      
+      // If debate is no longer running, also stop auto-progression
+      if (!response.data.is_running) {
+        setAutoProgress(false);
+      }
     } catch (error) {
       console.error('Error toggling debate state:', error);
     }
@@ -107,7 +162,7 @@ const DebateArena = () => {
           </div>
           <div className="debater-info">
             {debateStatus.current_debate.debaters.map((debater, index) => (
-              <span key={index}>
+              <span key={index} className={`debater-badge ${debater.position}`}>
                 {index > 0 && " vs "}
                 {debater.codename} ({debater.name})
               </span>
@@ -185,17 +240,45 @@ const DebateArena = () => {
             className={`message ${isProPosition ? 'pro-message' : 'anti-message'}`}
           >
             <div className="message-header">
-              <span className="debater-name">{group.debater}</span>
-              <span className={`position-badge ${isProPosition ? 'pro-badge' : 'anti-badge'}`}>
-                {isProPosition ? 'PRO' : 'ANTI'}
-              </span>
-              <span className="model-name">{group.model}</span>
+              <div className="debater-info-container">
+                <span className="debater-name">{group.debater}</span>
+                <span className={`position-badge ${isProPosition ? 'pro-badge' : 'anti-badge'}`}>
+                  {isProPosition ? 'PRO' : 'ANTI'}
+                </span>
+              </div>
+              <ModelDisplay model={group.model} position={group.position} />
             </div>
-            <div className="message-content">{group.content}</div>
+            <MessageContent content={group.content} />
           </div>
         );
       }
     });
+  };
+
+  // Render loading indicator during generation
+  const renderThinkingIndicator = () => {
+    if (!loading || !debateStatus.is_running) return null;
+    
+    // Determine which model is currently "thinking"
+    let currentModel = "AI";
+    let currentPosition = "";
+    
+    if (debateStatus.current_debate) {
+      const speaker = debateStatus.current_debate.debaters[debateStatus.current_debate.current_speaker];
+      currentModel = speaker.name;
+      currentPosition = speaker.position === 'pro' ? 'PRO' : 'ANTI';
+    }
+    
+    return (
+      <div className="thinking-indicator">
+        <span>{currentModel} ({currentPosition}) is thinking</span>
+        <div className="dots">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -217,25 +300,35 @@ const DebateArena = () => {
       
       <div className="chat-container">
         {renderChatMessages()}
+        {renderThinkingIndicator()}
         <div ref={messagesEndRef} />
       </div>
       
       <div className="debate-footer">
         {debateStatus.current_debate && !debateStatus.current_debate.finished && (
           <>
+            {!autoProgress && (
+              <button 
+                onClick={progressDebate} 
+                disabled={loading || !debateStatus.is_running}
+                className="button next-button"
+              >
+                Next Exchange
+              </button>
+            )}
             <button 
-              onClick={progressDebate} 
-              disabled={loading || !debateStatus.is_running}
-              className="button next-button"
+              onClick={toggleAutoProgress}
+              disabled={!debateStatus.is_running || loading}
+              className={`button ${autoProgress ? 'pause' : 'resume'}`}
             >
-              Next Exchange
+              {autoProgress ? 'Pause Auto-Progress' : 'Auto-Progress'}
             </button>
             <button 
               onClick={toggleDebateRunning}
               disabled={loading}
               className={`button toggle-button ${debateStatus.is_running ? 'pause' : 'resume'}`}
             >
-              {debateStatus.is_running ? 'Pause' : 'Resume'}
+              {debateStatus.is_running ? 'Pause Debate' : 'Resume Debate'}
             </button>
           </>
         )}
